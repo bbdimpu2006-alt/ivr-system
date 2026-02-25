@@ -1,17 +1,15 @@
 """
 Terminal-based Multi-Language Speech-to-Text
-Speak in terminal, get transcription in terminal
+Accurate transcription with noise filtering
 """
 import speech_recognition as sr
 from dotenv import load_dotenv
-import pyaudio
-import wave
-import io
-import threading
+import sys
+import time
 
 load_dotenv()
 
-# Supported languages (9 languages)
+# Supported languages (9 Indian languages + English)
 SUPPORTED_LANGUAGES = {
     '1': 'en-US',      # English
     '2': 'hi-IN',      # Hindi
@@ -24,50 +22,119 @@ SUPPORTED_LANGUAGES = {
     '9': 'ml-IN',      # Malayalam
 }
 
-# Microphone index (Realtek Audio) - auto-detect if this fails
-MICROPHONE_INDEX = 3
+# Microphone index (set to 2 for Realtek Audio)
+MICROPHONE_INDEX = 2
 
 
-def get_working_microphone():
-    """Find a working microphone"""
-    mics = sr.Microphone.list_microphone_names()
+class Transcriber:
+    def __init__(self):
+        self.recognizer = sr.Recognizer()
+        # Optimized settings for accurate speech recognition
+        self.recognizer.energy_threshold = 350  # Balanced - filters background noise
+        self.recognizer.dynamic_energy_threshold = True  # Auto-adjusts to environment
+        self.recognizer.dynamic_energy_adjustment_damping = 0.15  # Smooth adjustments
+        self.recognizer.dynamic_energy_ratio = 0.65  # Sensitivity ratio
+        self.recognizer.pause_threshold = 1.0  # Longer pause = complete phrase
+        self.recognizer.phrase_threshold = 0.5  # Min 0.5s of speech required
+        self.recognizer.non_speaking_duration = 0.5  # Buffer before/after speech
+        self.mic_index = self.get_working_microphone()
 
-    # Try specified index first
-    try:
-        mic = sr.Microphone(device_index=MICROPHONE_INDEX)
-        with mic:
-            pass  # Just test if it opens
-        return MICROPHONE_INDEX
-    except:
-        pass
+    def get_working_microphone(self):
+        """Find and test microphone"""
+        mics = sr.Microphone.list_microphone_names()
 
-    # Try to find Realtek in name
-    for i, name in enumerate(mics):
-        if 'realtek' in name.lower() or 'audio' in name.lower():
+        print(f"\n📋 Available microphones ({len(mics)}):")
+        for i, name in enumerate(mics):
+            print(f"   {i}: {name}")
+
+        # Try specified index first
+        if MICROPHONE_INDEX is not None and MICROPHONE_INDEX < len(mics):
             try:
-                mic = sr.Microphone(device_index=i)
+                mic = sr.Microphone(device_index=MICROPHONE_INDEX)
                 with mic:
                     pass
-                return i
-            except:
-                continue
+                print(f"✓ Using: {mics[MICROPHONE_INDEX]}\n")
+                return MICROPHONE_INDEX
+            except Exception as e:
+                print(f"  Index {MICROPHONE_INDEX} failed: {e}")
 
-    # Use default
-    return None
+        # Auto-detect common mics
+        keywords = ['realtek', 'microphone', 'usb', 'headset', 'headphone', 'audio']
+        for i, name in enumerate(mics):
+            name_lower = name.lower()
+            if any(kw in name_lower for kw in keywords):
+                try:
+                    mic = sr.Microphone(device_index=i)
+                    with mic:
+                        pass
+                    print(f"✓ Using: {name}\n")
+                    return i
+                except:
+                    continue
 
+        # Fallback to default
+        print("✓ Using default microphone\n")
+        return None
 
-def get_microphone_string(index):
-    """Get microphone name for display"""
-    mics = sr.Microphone.list_microphone_names()
-    if index is not None and index < len(mics):
-        return mics[index]
-    return "Default Microphone"
+    def transcribe_speech(self, language, retries=2):
+        """
+        Transcribe speech with retry logic for better accuracy
 
-# Initialize recognizer
-recognizer = sr.Recognizer()
-recognizer.energy_threshold = 300
-recognizer.dynamic_energy_threshold = True
-recognizer.pause_threshold = 0.8
+        Args:
+            language: Language code (e.g., 'te-IN')
+            retries: Number of retry attempts on failure
+
+        Returns:
+            tuple: (transcribed_text, error_message)
+        """
+        for attempt in range(1, retries + 1):
+            try:
+                with sr.Microphone(device_index=self.mic_index) as source:
+                    # Set source energy level
+                    source.gain = 10  # Boost input signal
+
+                    print(f"\n🎤 Listening... (speak clearly, 5s timeout)")
+                    sys.stdout.flush()
+
+                    # Ambient noise calibration
+                    print("  calibrating for noise...", end='', flush=True)
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.7)
+                    print(" done")
+
+                    try:
+                        # Listen for speech
+                        audio = self.recognizer.listen(
+                            source,
+                            timeout=5,  # Wait 5s for speech to start
+                            phrase_time_limit=5  # Max 5s of recording
+                        )
+
+                        print("⏳ Recognizing...")
+                        sys.stdout.flush()
+
+                        # Recognize with Google
+                        text = self.recognizer.recognize_google(audio, language=language)
+                        return text, None
+
+                    except sr.WaitTimeoutError:
+                        if attempt < retries:
+                            print("⚠️  No speech detected, try again...")
+                            time.sleep(0.5)
+                            continue
+                        return None, "No speech detected (timeout)"
+
+            except sr.UnknownValueError:
+                if attempt < retries:
+                    print("⚠️  Couldn't understand, please speak again...")
+                    time.sleep(0.5)
+                    continue
+                return None, "Could not understand. Speak clearly and try again."
+            except sr.RequestError as e:
+                return None, f"API Error: Check internet connection ({e})"
+            except Exception as e:
+                return None, f"Error: {e}"
+
+        return None, "Max retries exceeded"
 
 
 def show_languages():
@@ -76,7 +143,18 @@ def show_languages():
     print("SUPPORTED LANGUAGES")
     print("=" * 50)
     for key, value in SUPPORTED_LANGUAGES.items():
-        print(f"  {key:>2}. {value}")
+        lang_names = {
+            'en-US': 'English',
+            'hi-IN': 'Hindi (हिन्दी)',
+            'te-IN': 'Telugu (తెలుగు)',
+            'ta-IN': 'Tamil (தமிழ்)',
+            'bn-IN': 'Bengali (বাংলা)',
+            'mr-IN': 'Marathi (मराठी)',
+            'gu-IN': 'Gujarati (ગુજરાતી)',
+            'kn-IN': 'Kannada (ಕನ್ನಡ)',
+            'ml-IN': 'Malayalam (മലയാളം)',
+        }
+        print(f"  {key}. {value} - {lang_names.get(value, '')}")
     print("=" * 50)
 
 
@@ -84,7 +162,7 @@ def select_language():
     """Let user select language"""
     show_languages()
     while True:
-        choice = input("\nSelect language (number), or 'q' to quit: ").strip()
+        choice = input("\nSelect language (1-9), or 'q' to quit: ").strip()
         if choice.lower() == 'q':
             return None
         if choice in SUPPORTED_LANGUAGES:
@@ -92,296 +170,69 @@ def select_language():
         print("Invalid choice. Try again.")
 
 
-def transcribe_speech(language, mic_index, silence_timeout=5):
-    """Transcribe speech from microphone
-
-    Args:
-        language: Language code for recognition
-        mic_index: Microphone device index
-        silence_timeout: Seconds of silence before auto-stop (default: 5)
-
-    Returns:
-        tuple: (transcribed_text, error_message)
-
-    Note: Recording continues until user presses Enter or 5s of silence
-    """
-    import time
-    import struct
-    import numpy as np
-    from scipy import signal
-    from scipy.ndimage import median_filter
-
-    # Audio settings
-    CHUNK = 1024
-    FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
-    
-    # Frequency detection settings
-    MIN_FREQUENCY = 85      # Lowest human voice frequency (Hz)
-    MAX_FREQUENCY = 4000    # Upper limit for voice (includes harmonics)
-    ENERGY_THRESHOLD = 30   # Minimum energy in voice frequency range
-    
-    # Noise filtering settings
-    NOISE_FLOOR_DB = -40    # Noise floor in dB
-    SPECTRAL_GATE = 0.3     # Spectral gating threshold (0-1)
-
-    print(f"\nRecording... Speak now!")
-    print(f"   Press ENTER to stop (or {silence_timeout}s silence)")
-    print()
-
-    # Initialize PyAudio
-    p = pyaudio.PyAudio()
-
-    # Open microphone stream
-    try:
-        if mic_index is not None:
-            stream = p.open(format=FORMAT,
-                           channels=CHANNELS,
-                           rate=RATE,
-                           input=True,
-                           input_device_index=mic_index,
-                           frames_per_buffer=CHUNK)
-        else:
-            stream = p.open(format=FORMAT,
-                           channels=CHANNELS,
-                           rate=RATE,
-                           input=True,
-                           frames_per_buffer=CHUNK)
-    except Exception as e:
-        p.terminate()
-        return None, f"Error opening microphone: {e}"
-
-    frames = []
-    recording = True
-    
-    # Shared state
-    state = {
-        'silence_start': None,
-        'last_speech_time': None,
-        'start_time': time.time(),
-        'speech_started': False
-    }
-    
-    # Noise profile (collected during initial silence)
-    noise_profile = None
-    noise_frames_collected = 0
-    NOISE_SAMPLES = 10  # Collect first 10 frames for noise profile
-
-    def collect_noise_profile(data):
-        """Collect noise profile from initial frames"""
-        nonlocal noise_profile, noise_frames_collected
-        audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        
-        if noise_profile is None:
-            noise_profile = np.zeros_like(audio_data)
-        
-        noise_profile += np.abs(np.fft.fft(audio_data))
-        noise_frames_collected += 1
-        
-        if noise_frames_collected >= NOISE_SAMPLES:
-            noise_profile /= noise_frames_collected
-
-    def apply_noise_filter(data):
-        """Apply spectral subtraction and filtering to reduce noise"""
-        audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        
-        # Apply FFT
-        fft_data = np.fft.fft(audio_data)
-        magnitude = np.abs(fft_data)
-        phase = np.angle(fft_data)
-        
-        # Spectral subtraction using noise profile
-        if noise_profile is not None:
-            # Subtract noise spectrum with flooring
-            magnitude_filtered = np.maximum(magnitude - SPECTRAL_GATE * noise_profile, 
-                                            magnitude * 0.1)  # Spectral floor at 10%
-        else:
-            magnitude_filtered = magnitude
-        
-        # Apply bandpass filter for voice frequencies (80Hz - 4000Hz)
-        freqs = np.fft.fftfreq(len(audio_data), 1.0/RATE)
-        bandpass_mask = (np.abs(freqs) >= MIN_FREQUENCY) & (np.abs(freqs) <= MAX_FREQUENCY)
-        magnitude_filtered = magnitude_filtered * bandpass_mask
-        
-        # Reconstruct signal
-        fft_filtered = magnitude_filtered * np.exp(1j * phase)
-        filtered_audio = np.fft.ifft(fft_filtered).real.astype(np.int16)
-        
-        return filtered_audio.tobytes()
-
-    def detect_voice(data):
-        """Detect voice based on frequency analysis (FFT) with noise filtering"""
-        # Apply noise filter first
-        filtered_data = apply_noise_filter(data)
-        audio_data = np.frombuffer(filtered_data, dtype=np.int16).astype(np.float32)
-        
-        # Apply FFT to get frequency spectrum
-        fft_data = np.fft.fft(audio_data)
-        freqs = np.fft.fftfreq(len(audio_data), 1.0/RATE)
-        
-        # Get magnitude spectrum (only positive frequencies)
-        magnitude = np.abs(fft_data[:len(fft_data)//2])
-        pos_freqs = freqs[:len(freqs)//2]
-        
-        # Filter for human voice frequency range (fundamental + harmonics)
-        voice_mask = (pos_freqs >= MIN_FREQUENCY) & (pos_freqs <= MAX_FREQUENCY)
-        voice_energy = np.sum(magnitude[voice_mask])
-        
-        # Also check energy in fundamental frequency range (85-255 Hz)
-        fundamental_mask = (pos_freqs >= 85) & (pos_freqs <= 255)
-        fundamental_energy = np.sum(magnitude[fundamental_mask])
-        
-        # Voice detected if either total voice energy or fundamental energy is high
-        return (voice_energy > ENERGY_THRESHOLD * 100) or (fundamental_energy > ENERGY_THRESHOLD * 50)
-
-    def record():
-        """Record audio in background with frequency-based silence detection"""
-        nonlocal noise_frames_collected
-        while recording:
-            try:
-                data = stream.read(CHUNK, exception_on_overflow=False)
-                
-                # Collect noise profile during first few frames
-                if noise_frames_collected < NOISE_SAMPLES:
-                    collect_noise_profile(data)
-                
-                # Apply noise filtering and store filtered audio
-                filtered_data = apply_noise_filter(data)
-                frames.append(filtered_data)
-
-                # Detect voice using frequency analysis
-                if detect_voice(data):
-                    if not state['speech_started']:
-                        state['speech_started'] = True
-                    state['last_speech_time'] = time.time()
-                    state['silence_start'] = None
-                else:
-                    if state['speech_started'] and state['silence_start'] is None:
-                        state['silence_start'] = time.time()
-            except:
-                break
-
-    # Start recording thread
-    record_thread = threading.Thread(target=record)
-    record_thread.start()
-
-    # Monitor for silence timeout or user input
-    input_received = threading.Event()
-
-    def wait_for_input():
-        input()
-        input_received.set()
-
-    input_thread = threading.Thread(target=wait_for_input, daemon=True)
-    input_thread.start()
-
-    # Check for silence timeout in main thread
-    while recording:
-        # Timeout if no speech at start (5 seconds)
-        if not state['speech_started'] and time.time() - state['start_time'] > silence_timeout:
-            recording = False
-            print(f"\nNo speech detected ({silence_timeout}s), stopping...")
-            break
-        # Timeout if silence after speech (5 seconds)
-        if state['speech_started'] and state['silence_start'] is not None and time.time() - state['silence_start'] > silence_timeout:
-            recording = False
-            print(f"\nSilence detected ({silence_timeout}s), stopping...")
-            break
-        if input_received.is_set():
-            recording = False
-            break
-        time.sleep(0.1)
-
-    record_thread.join(timeout=1)
-
-    # Stop and close stream
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-    if not frames:
-        return None, "No audio captured"
-
-    print("\nProcessing speech...")
-
-    # Convert to WAV format in memory
-    wav_buffer = io.BytesIO()
-    wf = wave.open(wav_buffer, 'wb')
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
-    wf.setframerate(RATE)
-    wf.writeframes(b''.join(frames))
-    wf.close()
-
-    # Recognize speech
-    try:
-        wav_buffer.seek(0)
-        with sr.AudioFile(wav_buffer) as source:
-            audio_data = recognizer.record(source)
-        text = recognizer.recognize_google(audio_data, language=language)
-        return text, None
-    except sr.UnknownValueError:
-        return None, "Could not understand audio. Please try again."
-    except sr.RequestError as e:
-        return None, f"API Error: {e}"
-    except Exception as e:
-        return None, f"Error: {e}"
-
-
 def main():
-    """Main loop"""
+    """Main transcription loop"""
     print("\n" + "=" * 50)
-    print("MULTI-LANGUAGE SPEECH-TO-TEXT (TERMINAL)")
+    print("🎙️  SPEECH-TO-TEXT (ACCURATE MODE)")
     print("=" * 50)
 
-    # Find working microphone
-    mic_index = get_working_microphone()
+    transcriber = Transcriber()
 
     language = select_language()
     if not language:
-        print("Goodbye!")
+        print("\n👋 Goodbye!")
         return
 
-    print(f"\nLanguage set to: {language}")
-    print("\nCommands:")
-    print("  - Just speak, transcription appears automatically")
-    print("  - Type 'lang' to change language")
-    print("  - Type 'quit' or 'q' to exit")
+    print(f"\n✅ Language: {language}")
+    print("\n📝 Instructions:")
+    print("   • Press ENTER to start recording")
+    print("   • Speak clearly and at normal pace")
+    print("   • Type 'lang' to change language")
+    print("   • Type 'q' to quit")
     print("-" * 50)
+
+    consecutive_errors = 0
 
     while True:
         try:
-            user_input = input("\nPress Enter to speak (or type command): ").strip()
+            user_input = input("\nPress ENTER to speak (or 'q'/'lang'): ").strip()
 
             if user_input.lower() in ['quit', 'q', 'exit']:
-                print("\nGoodbye!")
+                print("\n👋 Goodbye!")
                 break
             elif user_input.lower() == 'lang':
                 language = select_language()
                 if not language:
-                    print("\nGoodbye!")
+                    print("\n👋 Goodbye!")
                     break
-                print(f"\nLanguage set to: {language}")
+                print(f"\n✅ Language: {language}")
+                consecutive_errors = 0
                 continue
             elif user_input == '':
-                text, error = transcribe_speech(language, mic_index)
+                text, error = transcriber.transcribe_speech(language)
+
                 if error:
-                    print(f"Error: {error}")
+                    consecutive_errors += 1
+                    print(f"⚠️  {error}")
+                    if consecutive_errors >= 3:
+                        print("\n💡 Tip: Speak louder/closer to mic, or check mic settings")
+                        consecutive_errors = 0
                 else:
+                    consecutive_errors = 0
                     print("\n" + "=" * 50)
-                    print(f"TRANSCRIPTION ({language})")
+                    print(f"📄 TRANSCRIPTION ({language})")
                     print("=" * 50)
-                    print(f"   {text}")
+                    print(f"   \"{text}\"")
                     print("=" * 50)
             else:
-                print("Unknown command. Press Enter to speak, 'lang' to change language, 'q' to quit.")
+                print("⚠️  Press ENTER to speak, 'lang' to change language, 'q' to quit")
 
         except KeyboardInterrupt:
-            print("\n\nGoodbye!")
+            print("\n\n👋 Goodbye!")
             break
         except Exception as e:
-            print(f"\nError: {e}")
+            print(f"\n❌ Error: {e}")
+            consecutive_errors = 0
 
 
 if __name__ == '__main__':

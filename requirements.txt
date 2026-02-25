@@ -1,19 +1,7 @@
-# Web Framework
-flask>=2.3.0
-
-# Telephony & Voice
-twilio>=8.0.0
-
-# Audio Processing
-pydub>=0.25.1
-
 # Speech Recognition
 SpeechRecognition>=3.10.0
 PyAudio>=0.2.13
-numpy>=1.24.0
-
-# HTTP Requests
-requests>=2.31.0
-
+# Text-to-Speech
+gTTS>=2.4.0
 # Environment Variables
 python-dotenv>=1.0.0
